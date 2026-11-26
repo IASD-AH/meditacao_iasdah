@@ -142,13 +142,30 @@ function marcarSessaoInvalida(reason) {
 // se perdeu e é preciso religar o bot ao WhatsApp.
 const MODO_PAREAMENTO = process.env.WHATSAPP_PAREAMENTO === '1';
 
-// Mensagens finais de motivação para a leitura diária (uma é escolhida
-// aleatoriamente em cada execução). Enviada após a última meditação.
+// Mensagens finais de motivação para a leitura diária. Enviada após a
+// última meditação. Uma por dia, em rotação (ver motivacaoDoDia).
 const MOTIVACOES = [
     '🌅✨ E com isto terminamos as meditações de hoje!\n\n📖 Reserve um momento tranquilo para a leitura diária — "a tua palavra é lâmpada para os meus pés e luz para o meu caminho" (Salmo 119:105). 🙏\n\nBom dia abençoado! 💛',
     '☀️🙏 As meditações de hoje já estão no grupo!\n\n📚 Um pouquinho da Palavra de manhã transforma o dia inteiro. Não te esqueças da leitura de hoje! 📖✨\n\nTenha um ótimo dia! 💛',
-    '🌱💛 Três meditações, três oportunidades de crescer hoje!\n\n✝️ Completa o dia com a leitura diária — os pequenos momentos com Deus fazem toda a diferença. 📖🔥\n\nUm dia abençoado para todos! ☀️'
+    '🌱💛 Três meditações, três oportunidades de crescer hoje!\n\n✝️ Completa o dia com a leitura diária — os pequenos momentos com Deus fazem toda a diferença. 📖🔥\n\nUm dia abençoado para todos! ☀️',
+    '🌄🕊️ Mais um dia, mais uma oportunidade de estar com Deus!\n\n📖 "Novas são cada manhã; grande é a tua fidelidade" (Lamentações 3:23). Que a leitura de hoje renove as tuas forças. 🙏\n\nUm dia cheio de paz! 💛',
+    '📖🍞 As meditações já cá estão — agora é a tua vez!\n\n✨ "Nem só de pão viverá o homem, mas de toda a palavra que sai da boca de Deus" (Mateus 4:4). Alimenta a alma com a leitura de hoje. 🙌\n\nBom dia a todos! ☀️',
+    '💪🙏 Coragem para o dia que começa!\n\n📚 "O Senhor, teu Deus, é contigo, por onde quer que andares" (Josué 1:9). Leva esta certeza contigo e não deixes de fazer a leitura diária. 📖💛\n\nUm dia abençoado! 🌿',
+    '🌤️🎶 "Pela manhã ouvirás a minha voz, ó Senhor" (Salmo 5:3).\n\n📖 Começa o dia a conversar com Deus — uma oração e a leitura de hoje fazem toda a diferença. ✨🙏\n\nQue tenhas um dia maravilhoso! 💛'
 ];
+
+// Rotação por dia de calendário (fuso de Lisboa): dias consecutivos recebem
+// sempre mensagens diferentes e cada uma repete-se só ao fim de 7 dias,
+// sem precisar de guardar estado entre execuções. Re-execuções no mesmo
+// dia repetem a mensagem desse dia.
+function indiceMotivacaoDoDia(data = new Date()) {
+    const [ano, mes, dia] = data
+        .toLocaleDateString('en-CA', { timeZone: 'Europe/Lisbon' })
+        .split('-')
+        .map(Number);
+    const diasDesdeEpoch = Math.floor(Date.UTC(ano, mes - 1, dia) / 86400000);
+    return diasDesdeEpoch % MOTIVACOES.length;
+}
 
 // ------------------------------------------------------------
 // ENVIO DE QR CODE PARA O TELEGRAM (visualização no telemóvel)
@@ -731,7 +748,9 @@ async function executarEnvio(client) {
         await new Promise(resolve => setTimeout(resolve, 20000));
 
         try {
-            const motivacao = MOTIVACOES[Math.floor(Math.random() * MOTIVACOES.length)];
+            const indice = indiceMotivacaoDoDia();
+            const motivacao = MOTIVACOES[indice];
+            console.log(`Mensagem de motivação do dia: ${indice + 1}/${MOTIVACOES.length}.`);
             await client.sendMessage(groupId, motivacao);
             console.log('✅ Mensagem de motivação enviada.');
         } catch (err) {
