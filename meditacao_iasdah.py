@@ -14,9 +14,8 @@ from urllib.parse import urljoin
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 20
 EMAIL_RECEIVER = "filmfer@gmail.com"
-# O ficheiro whatsapp_msg.txt é limpo apenas quando todas as 3 meditações
-# são processadas com sucesso (no final do script), para evitar perder
-# conteúdo de execuções anteriores em caso de falha parcial.
+# O ficheiro whatsapp_msg.txt é recriado vazio no início de cada execução
+# e mantido no fim: é o payload consumido pelo send_whatsapp.js.
 
 # Suprime avisos de SSL explícitamente
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
@@ -232,6 +231,10 @@ if __name__ == "__main__":
 
         resultados = []
 
+        # Payload do WhatsApp começa vazio em cada execução; cada meditação
+        # bem-sucedida é acrescentada (modo "a") no ciclo abaixo.
+        open("whatsapp_msg.txt", "w", encoding="utf-8").close()
+
         for url, title in meditation_sources:
             print("\n" + "="*60)
             print("--- Processando: " + title + " ---")
@@ -308,13 +311,14 @@ if __name__ == "__main__":
             if not (scrap_ok and tel_ok and wha_ok):
                 todas_ok = False
 
+        # NOTA: o whatsapp_msg.txt NUNCA é apagado aqui — é o payload que o
+        # send_whatsapp.js lê no passo seguinte. A versão anterior esvaziava-o
+        # precisamente quando as 3 meditações tinham sucesso, o que fazia o
+        # WhatsApp abortar com "Nenhuma meditação válida encontrada no payload".
         if todas_ok:
             print("\n✅ Todas as 3 meditações foram processadas com sucesso.")
-            if os.path.exists("whatsapp_msg.txt"):
-                os.remove("whatsapp_msg.txt")
-            open("whatsapp_msg.txt", "w", encoding="utf-8").close()
         else:
-            print("\n⚠️  Alguma(s) meditação(ões) falhou(ram). O ficheiro whatsapp_msg.txt foi mantido para inspeção.")
+            print("\n⚠️  Alguma(s) meditação(ões) falhou(ram). O WhatsApp recebe apenas as que tiveram sucesso.")
             linhas_email = ["Nem todas as 3 meditações foram processadas com sucesso.\n\nResultados:"]
             for t, s, tg, w in resultados:
                 linhas_email.append("  " + t + ": scraping=[" + ("OK" if s else "FALHA") + "] telegram=[" + ("OK" if tg else "FALHA") + "] whatsapp=[" + ("OK" if w else "FALHA") + "]")

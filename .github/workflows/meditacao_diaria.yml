@@ -15,7 +15,6 @@ on:
 permissions:
   actions: read
   contents: read
-  checks: read
 
 concurrency:
   group: meditacao-diaria
@@ -23,15 +22,10 @@ concurrency:
 
 jobs:
   build-and-send:
-  
-    permissions:
-      actions: read
-      contents: read
-      checks: read
-      
+
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
 
@@ -43,13 +37,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Mostrar hora do runner
-        run: |
-          echo "UTC:"
-          date -u
-
-          echo ""
-          echo "Runner:"
-          date
+        run: date -u
 
       ############################################################
       # AMBIENTE
@@ -64,6 +52,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
 
       - name: Instalar locale pt_PT
         run: |
@@ -75,59 +64,50 @@ jobs:
       ############################################################
       # RESTAURAR SESSÃO
       ############################################################
-      - name: Verificar sessão válida
-        run: |
-          python session_manager.py health || true
-          
+      # Descarrega o artefacto whatsapp-session MAIS RECENTE e não expirado,
+      # independentemente do resultado do run que o criou. Antes só se
+      # aceitavam runs "success": uma sessão renovada num run que depois
+      # falhou no envio nunca era reutilizada e o bot ficava preso a um
+      # snapshot cada vez mais antigo.
+      # Repositório PÚBLICO: qualquer utilizador GitHub pode descarregar
+      # artefactos. A sessão (= acesso total à conta WhatsApp) é por isso
+      # cifrada com AES-256 usando o secret WHATSAPP_SESSION_KEY.
       - name: Restaurar sessão WhatsApp
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: meditacao_diaria.yml
-          branch: main
-          workflow_search: true
-          workflow_conclusion: success
-          name: whatsapp-session
-          path: .
-          if_no_artifact_found: warn
-
-      - name: Mostrar contexto GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WHATSAPP_SESSION_KEY: ${{ secrets.WHATSAPP_SESSION_KEY }}
         run: |
-          echo "Workflow: $GITHUB_WORKFLOW"
-          echo "Ref: $GITHUB_REF"
-          echo "Branch: $GITHUB_REF_NAME"
-          echo "Run ID: $GITHUB_RUN_ID"
+          ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=whatsapp-session&per_page=30" \
+                 --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].id // empty')
+          if [ -z "$ID" ]; then
+            echo "::warning::Nenhum artefacto whatsapp-session disponível — será necessário pareamento."
+            exit 0
+          fi
+          echo "A descarregar artefacto $ID"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ID}/zip" > session.zip
+          unzip -o -q session.zip
+          rm -f session.zip
+          if [ -f whatsapp-session.tar.gz.enc ]; then
+            if [ -z "$WHATSAPP_SESSION_KEY" ]; then
+              echo "::error::Sessão cifrada mas o secret WHATSAPP_SESSION_KEY não está definido."
+              exit 1
+            fi
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+              -in whatsapp-session.tar.gz.enc -out whatsapp-session.tar.gz \
+              -pass env:WHATSAPP_SESSION_KEY
+            rm -f whatsapp-session.tar.gz.enc
+          fi
+          ls -lh whatsapp-session*.tar.gz
 
-      - name: Diagnóstico do download
-        run: |
-          echo "=== Conteúdo atual ==="
-          ls -lah
-
-          echo ""
-          echo "=== Artefactos encontrados ==="
-          find . -name "*.tar.gz" || true
-
-      - name: Restaurar sessão (tenta forçar se necessário)
+      - name: Extrair e validar sessão
         run: |
           python session_manager.py restore --forcar || \
             python session_manager.py recuperar --forcar || true
-
-      - name: Diagnóstico da sessão restaurada
-        run: |
-          echo "=== Sessão ==="
-
-          if [ -d whatsapp_auth ]; then
-            du -sh whatsapp_auth
-          else
-            echo "whatsapp_auth inexistente"
-          fi
-
-          echo ""
-          echo "=== Markers ==="
-          find whatsapp_auth -maxdepth 2 -type f 2>/dev/null | grep -E '\.(autenticado|ready|invalido)$' || true
-
-      - name: Health check da sessão (tolerante)
-        run: python session_manager.py health --forcar || true
+          # Locks de um Chromium antigo impedem o arranque ("browser is already running").
+          rm -f whatsapp_auth/session/Singleton* || true
+          # Nunca herdar o marker de sessão fresca de outra execução.
+          rm -f .session_fresh
+          du -sh whatsapp_auth 2>/dev/null || echo "whatsapp_auth inexistente"
 
       ############################################################
       # DEPENDÊNCIAS
@@ -136,14 +116,12 @@ jobs:
       - name: Instalar dependências
         run: |
           python -m pip install --upgrade pip
+          pip install requests==2.32.5 beautifulsoup4==4.14.2 urllib3==2.5.0
 
-          pip install requests
-          pip install beautifulsoup4
-          pip install urllib3
-
-          npm install whatsapp-web.js@1.34.7
-          npm install qrcode-terminal
-          npm install qrcode
+          # Versões fixadas em package.json/package-lock.json
+          # (whatsapp-web.js 1.34.8 corrige "getChat" undefined, id._serialized
+          # e a re-injeção da SPA que causava "Execution context was destroyed").
+          npm ci --no-audit --no-fund
 
       ############################################################
       # TELEGRAM
@@ -167,8 +145,11 @@ jobs:
         env:
           WHATSAPP_GROUP_ID: ${{ secrets.WHATSAPP_GROUP_ID }}
           WHATSAPP_PAREAMENTO: ${{ inputs.pareamento && '1' || '0' }}
+          # Opcional: fixar a versão do WhatsApp Web (variável do repositório).
+          WHATSAPP_WEB_VERSION: ${{ vars.WHATSAPP_WEB_VERSION }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # QR só para o chat pessoal do administrador, nunca para o canal.
+          TELEGRAM_PERSONAL_CHAT_ID: ${{ secrets.TELEGRAM_PERSONAL_CHAT_ID }}
         run: node send_whatsapp.js
 
       ############################################################
@@ -180,50 +161,45 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_PERSONAL_CHAT_ID: ${{ secrets.TELEGRAM_PERSONAL_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SESSAO_FRESCA: ${{ hashFiles('.session_fresh') != '' && '1' || '0' }}
         run: python alert_failure.py
 
       ############################################################
       # GUARDAR SESSÃO
       ############################################################
+      # Guarda sempre que ESTA execução autenticou (.session_fresh, escrito
+      # no evento 'ready' e fora do tarball) — mesmo que o envio tenha
+      # falhado. Assim o artefacto é renovado a cada login bem-sucedido e a
+      # retenção de 90 dias conta a partir do último login, não do último
+      # envio perfeito. Uma sessão revogada apaga o marker e nunca é guardada.
 
       - name: Limpar caches da sessão
-        if: ${{ hashFiles('whatsapp_auth/.autenticado') != '' }}
+        if: ${{ always() && hashFiles('.session_fresh') != '' }}
         run: python session_manager.py clean
 
-      - name: Health check final
-        if: ${{ hashFiles('whatsapp_auth/.autenticado') != '' }}
-        run: python session_manager.py health || true
-
-      - name: Compactar sessão
-        if: ${{ hashFiles('whatsapp_auth/.autenticado') != '' }}
-        run: python session_manager.py compress
-
-      - name: Verificar tarball
-        if: ${{ hashFiles('whatsapp_auth/.autenticado') != '' }}
+      - name: Compactar e cifrar sessão
+        if: ${{ always() && hashFiles('.session_fresh') != '' }}
+        env:
+          WHATSAPP_SESSION_KEY: ${{ secrets.WHATSAPP_SESSION_KEY }}
         run: |
-          test -f whatsapp-session.tar.gz
-
-          echo "=== Tarball ==="
-          ls -lh whatsapp-session.tar.gz
+          python session_manager.py compress
+          if [ -n "$WHATSAPP_SESSION_KEY" ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+              -in whatsapp-session.tar.gz -out whatsapp-session.tar.gz.enc \
+              -pass env:WHATSAPP_SESSION_KEY
+            rm -f whatsapp-session.tar.gz
+          else
+            echo "::warning::WHATSAPP_SESSION_KEY não definido: sessão guardada SEM cifra num repositório público."
+          fi
+          ls -lh whatsapp-session.tar.gz*
 
       - name: Guardar sessão WhatsApp
         uses: actions/upload-artifact@v4
-        if: ${{ hashFiles('whatsapp_auth/.autenticado') != '' }}
+        if: ${{ always() && hashFiles('.session_fresh') != '' }}
         with:
           name: whatsapp-session
-          path: whatsapp-session.tar.gz
+          path: whatsapp-session.tar.gz*
           retention-days: 90
           overwrite: true
-          include-hidden-files: true
-
-      - name: Diagnóstico final
-        if: always()
-        run: |
-          echo "=== Artefactos locais ==="
-
-          ls -lh *.tar.gz 2>/dev/null || true
-
-          echo ""
-          echo "=== Sessão ==="
-
-          du -sh whatsapp_auth 2>/dev/null || true
+          if-no-files-found: error
