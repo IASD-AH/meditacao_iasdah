@@ -16,6 +16,37 @@ const AUTH_MARKER = './whatsapp_auth/.autenticado';
 const READY_MARKER = './whatsapp_auth/.ready';
 const INVALID_MARKER = './whatsapp_auth/.invalido';
 
+// Marker FORA de whatsapp_auth (logo, nunca entra no tarball): só existe se
+// ESTA execução autenticou. O .autenticado vem dentro do artefacto restaurado
+// e por isso não distingue uma sessão fresca de uma sessão antiga — o
+// workflow usa o .session_fresh para decidir se guarda a sessão.
+const FRESH_MARKER = './.session_fresh';
+
+// ------------------------------------------------------------
+// REDE DE SEGURANÇA GLOBAL
+// ------------------------------------------------------------
+// O WhatsApp Web recarrega a SPA logo após o login; o puppeteer rejeita
+// promessas internas da biblioteca (sem catch) com "Execution context was
+// destroyed" — no Node 22 isso matava o processo a meio do arranque
+// (runs de 2026-10-21 e 2026-10-25). Estes erros de navegação são
+// transitórios: registamos e deixamos o watchdog/retry decidir.
+const ERROS_NAVEGACAO = /Execution context was destroyed|Target closed|Session closed|detached Frame/i;
+
+process.on('unhandledRejection', (reason) => {
+    const msg = (reason && reason.message) || String(reason);
+    console.error('Aviso: promessa rejeitada sem tratamento (ignorada):', msg);
+});
+
+process.on('uncaughtException', (err) => {
+    const msg = (err && err.message) || String(err);
+    if (ERROS_NAVEGACAO.test(msg)) {
+        console.error('Aviso: erro de navegação do WhatsApp Web (ignorado):', msg);
+        return;
+    }
+    console.error('Erro fatal não tratado:', (err && err.stack) || msg);
+    process.exit(1);
+});
+
 function marcarSessaoAutenticada() {
 
     try {
@@ -28,6 +59,8 @@ function marcarSessaoAutenticada() {
             AUTH_MARKER,
             String(Date.now())
         );
+
+        fs.writeFileSync(FRESH_MARKER, new Date().toISOString());
 
         fs.writeFileSync(
             READY_MARKER,
@@ -69,6 +102,11 @@ function marcarSessaoInvalida(reason) {
 
         if (fs.existsSync(READY_MARKER)) {
             fs.unlinkSync(READY_MARKER);
+        }
+
+        // Sessão revogada: não deve ser guardada por cima do último artefacto.
+        if (fs.existsSync(FRESH_MARKER)) {
+            fs.unlinkSync(FRESH_MARKER);
         }
 
         fs.writeFileSync(
@@ -120,13 +158,16 @@ const MOTIVACOES = [
 // logs do GitHub Actions. Esta função gera o QR como imagem PNG e
 // envia via Bot API para o chat do Telegram, para que possa ser
 // escaneado diretamente de uma foto.
+// O QR vai SÓ para o chat pessoal do administrador: publicá-lo no canal
+// das meditações permitiria a qualquer membro scanear e ligar a SUA conta
+// ao bot.
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_PERSONAL_CHAT_ID;
 
 function enviarQrParaTelegram(qrDataUrl) {
     return new Promise((resolve) => {
         if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-            console.log('ℹ️  TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID não definidos; QR Code não enviado para o Telegram.');
+            console.log('ℹ️  TELEGRAM_BOT_TOKEN/TELEGRAM_PERSONAL_CHAT_ID não definidos; QR Code não enviado para o Telegram.');
             resolve();
             return;
         }
@@ -139,23 +180,16 @@ function enviarQrParaTelegram(qrDataUrl) {
             return;
         }
 
-        const base64Data = match[1];
-        const boundary = '----TelegramQrBoundary' + Date.now();
-
-        const bodyParts = [];
-        bodyParts.push(`--${boundary}`);
-        bodyParts.push(`Content-Disposition: form-data; name="chat_id"`);
-        bodyParts.push('');
-        bodyParts.push(TELEGRAM_CHAT_ID);
-        bodyParts.push(`--${boundary}`);
-        bodyParts.push(`Content-Disposition: form-data; name="photo"; filename="qr_code.png"`);
-        bodyParts.push('Content-Type: image/png');
-        bodyParts.push('');
-        bodyParts.push(base64Data);
-        bodyParts.push(`--${boundary}--`);
-        bodyParts.push('');
-
-        const body = bodyParts.join('\r\n');
+        // O ficheiro tem de seguir em BYTES PNG, não em texto base64: com
+        // base64 o Telegram respondia "IMAGE_PROCESS_FAILED" e o QR nunca
+        // chegava ao telemóvel, impossibilitando o re-pareamento.
+        const body = construirMultipartFoto(
+            TELEGRAM_CHAT_ID,
+            Buffer.from(match[1], 'base64'),
+            'qr_code.png',
+            'WhatsApp: Definições > Dispositivos ligados > Ligar um dispositivo. Válido ~60s; novos QR seguem automaticamente.'
+        );
+        const boundary = body.boundary;
 
         const options = {
             hostname: 'api.telegram.org',
@@ -164,7 +198,7 @@ function enviarQrParaTelegram(qrDataUrl) {
             method: 'POST',
             headers: {
                 'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                'Content-Length': Buffer.byteLength(body)
+                'Content-Length': body.buffer.length
             }
         };
 
@@ -191,9 +225,32 @@ function enviarQrParaTelegram(qrDataUrl) {
             resolve();
         });
 
-        req.write(body);
+        req.write(body.buffer);
         req.end();
     });
+}
+
+// Corpo multipart/form-data para sendPhoto: campos de texto + 1 ficheiro
+// binário. Devolve { buffer, boundary }.
+function construirMultipartFoto(chatId, pngBytes, filename, caption) {
+    const boundary = '----TelegramQrBoundary' + Date.now();
+    const campo = (nome, valor) =>
+        `--${boundary}\r\nContent-Disposition: form-data; name="${nome}"\r\n\r\n${valor}\r\n`;
+
+    const cabecalho =
+        campo('chat_id', chatId) +
+        (caption ? campo('caption', caption) : '') +
+        `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\n` +
+        'Content-Type: image/png\r\n\r\n';
+
+    return {
+        boundary,
+        buffer: Buffer.concat([
+            Buffer.from(cabecalho, 'utf8'),
+            pngBytes,
+            Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
+        ])
+    };
 }
 
 // ------------------------------------------------------------
@@ -242,8 +299,30 @@ async function descarregarMiniatura(videoId) {
     return null;
 }
 
+// Pin opcional da versão do WhatsApp Web. Por omissão NÃO há pin: o pin
+// fixo 2.3000.1046922887-alpha expirou a 2026-11-06 e foi removido do
+// catálogo wppconnect, deixando o boot suspenso sem 'qr' nem 'ready' (todas
+// as execuções desde então). Para fixar uma versão em caso de emergência,
+// definir WHATSAPP_WEB_VERSION (ex.: 2.3000.1056346120-alpha) com a versão
+// "current" de https://wppconnect.io/whatsapp-versions.
+function configVersaoWeb() {
+    const versao = (process.env.WHATSAPP_WEB_VERSION || '').trim();
+    if (!/^[0-9.]+(-alpha|-beta)?$/.test(versao)) {
+        return { webVersionCache: { type: 'none' } };
+    }
+    console.log(`A usar WhatsApp Web fixado em ${versao}.`);
+    return {
+        webVersion: versao,
+        webVersionCache: {
+            type: 'remote',
+            remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${versao}.html`
+        }
+    };
+}
+
 function criarCliente() {
     return new Client({
+        ...configVersaoWeb(),
         authStrategy: new LocalAuth({
             dataPath: './whatsapp_auth'
         }),
@@ -264,21 +343,47 @@ function criarCliente() {
             // julho de 2026. O valor default (60s) é insuficiente para operações
             // do WhatsApp Web neste ambiente.
             protocolTimeout: 180000
-        },
-        // webVersionCache pin RESTAURADO (2026-09-06): o WhatsApp passou a
-        // servir uma versão que o mecanismo default da biblioteca não consegue
-        // carregar — o boot do WhatsApp Web fica suspenso antes de gerar QR
-        // ("Nem 'qr' nem 'ready' disparado em 90s"), exactamente a falha do
-        // run de 2026-09-06 20:03 UTC. O pin aponta para a versão CURRENT
-        // listada em https://wppconnect.io/whatsapp-versions (validade ~2
-        // meses: 2.3000.1046922887-alpha expira a 2026-11-06). Quando este
-        // erro voltar a aparecer, actualizar o remotePath para a nova versão
-        // current dessa página — nunca deixar um pin expirado no lugar.
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1046922887-alpha.html'
         }
     });
+}
+
+// ------------------------------------------------------------
+// LIBERTAR O PERFIL DO CHROMIUM ENTRE TENTATIVAS
+// ------------------------------------------------------------
+// client.destroy() numa tentativa que não chegou a 'ready' nem sempre fecha
+// o Chromium; o processo vivo mantém o SingletonLock e as tentativas
+// seguintes falham de imediato com "The browser is already running for
+// .../whatsapp_auth/session" (runs de 2026-11-25 e 2026-11-26).
+const SINGLETONS = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+
+async function libertarCliente(client) {
+    try {
+        await Promise.race([
+            client.destroy(),
+            new Promise((resolve) => setTimeout(resolve, 15000))
+        ]);
+    } catch (err) {
+        console.error('Aviso: erro durante client.destroy() (não-fatal):', err.message || err);
+    }
+
+    try {
+        const proc = client.pupBrowser && client.pupBrowser.process();
+        if (proc && proc.exitCode === null && !proc.killed) {
+            proc.kill('SIGKILL');
+            console.error('Chromium da tentativa anterior terminado à força.');
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+    } catch (err) {
+        console.error('Aviso: não foi possível terminar o Chromium:', err.message || err);
+    }
+
+    for (const nome of SINGLETONS) {
+        try {
+            fs.rmSync(`./whatsapp_auth/session/${nome}`, { force: true });
+        } catch (err) {
+            console.error(`Aviso: não foi possível remover ${nome}:`, err.message || err);
+        }
+    }
 }
 
 // ------------------------------------------------------------
@@ -290,7 +395,10 @@ function criarCliente() {
 // 2026-09-06). O watchdog de 90s fecha cada tentativa; falhas
 // transitórias de rede/boot são absorvidas sem gastar o run inteiro.
 const MAX_TENTATIVAS_INIT = 3;
-const TEMPO_WATCHDOG_INIT = 90000;
+// 90s era curto para restaurar um perfil de ~55 MB (IndexedDB ~24 MB) num
+// runner partilhado. O watchdog é reiniciado a cada sinal de progresso
+// ('loading_screen', 'authenticated'), por isso só dispara num boot parado.
+const TEMPO_WATCHDOG_INIT = 150000;
 
 function autenticar() {
     return new Promise((resolveCliente) => {
@@ -313,7 +421,21 @@ function autenticar() {
                 };
 
                 const resultado = await new Promise((resolve) => {
-                    const watchdog = setTimeout(() => resolve('timeout'), TEMPO_WATCHDOG_INIT);
+                    let watchdog = setTimeout(() => resolve('timeout'), TEMPO_WATCHDOG_INIT);
+                    const rearmarWatchdog = () => {
+                        clearTimeout(watchdog);
+                        watchdog = setTimeout(() => resolve('timeout'), TEMPO_WATCHDOG_INIT);
+                    };
+
+                    client.on('loading_screen', (percent, message) => {
+                        console.log(`A carregar WhatsApp Web: ${percent}% ${message || ''}`);
+                        rearmarWatchdog();
+                    });
+
+                    client.on('authenticated', () => {
+                        console.log('Sessão aceite pelo WhatsApp (authenticated); a aguardar ready...');
+                        rearmarWatchdog();
+                    });
 
                     client.on('qr', async (qr) => {
                         clearTimeout(watchdog);
@@ -406,17 +528,18 @@ function autenticar() {
                 // contrário dispara process.exit(1) durante a próxima tentativa.
                 limparQrTimeout();
                 console.error(`Tentativa ${tentativa}/${MAX_TENTATIVAS_INIT} falhou (${resultado}). A destruir o cliente e a tentar de novo...`);
-                try {
-                    await Promise.race([
-                        client.destroy(),
-                        new Promise((resolve) => setTimeout(resolve, 15000))
-                    ]);
-                } catch (err) {
-                    console.error('Aviso: erro durante client.destroy() entre tentativas (não-fatal):', err.message || err);
+                finalizando = true; // o destroy() não é uma desconexão real
+                await libertarCliente(client);
+                finalizando = false;
+
+                // auth_failure = credenciais revogadas: repetir com o mesmo
+                // perfil só gasta tempo. Sai para o alerta pedir pareamento.
+                if (resultado === 'auth_failure') {
+                    break;
                 }
             }
 
-            console.error(`Abort: autenticação falhou após ${MAX_TENTATIVAS_INIT} tentativas de ${TEMPO_WATCHDOG_INIT / 1000}s. Provável incompatibilidade de versão do WhatsApp Web (actualizar o webVersionCache com a versão current de https://wppconnect.io/whatsapp-versions) ou falha de rede.`);
+            console.error('Abort: autenticação no WhatsApp falhou. Se nenhum QR foi gerado, tentar o pin WHATSAPP_WEB_VERSION (ver criarCliente); se a sessão foi revogada, correr o workflow com "pareamento" e scanear o QR enviado para o Telegram pessoal.');
             process.exit(1);
         })();
     });
@@ -539,7 +662,7 @@ async function executarEnvio(client) {
             let enviado = false;
             let ultimoErro = null;
 
-            for (let tentativa = 1; tentativa <= 2 && !enviado; tentativa++) {
+            for (let tentativa = 1; tentativa <= 3 && !enviado; tentativa++) {
                 try {
                     if (miniatura) {
                         // UMA ÚNICA MENSAGEM: a miniatura do vídeo aparece
@@ -559,7 +682,7 @@ async function executarEnvio(client) {
                 } catch (err) {
                     ultimoErro = err.message || String(err);
                     console.error(`Falha ao enviar mensagem ${numero} (tentativa ${tentativa}):`, ultimoErro);
-                    if (tentativa < 2) {
+                    if (tentativa < 3) {
                         console.log('A aguardar antes de tentar novamente...');
                         console.log('A aguardar 15 segundos antes de tentar novamente...');
                         await new Promise(resolve => setTimeout(resolve, 15000));

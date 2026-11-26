@@ -55,9 +55,13 @@ def _fazer_backup_sessao():
         return None
 
 
-def _extrair_arquivo(arquivo, destino=Path(".")):
+def _extrair_arquivo(arquivo: Path, destino: Path = Path(".")) -> None:
     with tarfile.open(arquivo, "r:gz") as tar:
-        tar.extractall(path=destino)
+        # filter="data" bloqueia path traversal / links para fora do destino.
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(path=destino, filter="data")
+        else:
+            tar.extractall(path=destino)
 
 
 # ------------------------------------------------------------

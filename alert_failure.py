@@ -13,17 +13,30 @@ def send_telegram_alert():
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
-    alert_text = (
-        "🚨 *FALHA CRÍTICA NO BOT* 🚨\n\n"
-        "O script de meditações falhou ao autenticar no WhatsApp.\n"
-        "A *sessão do WhatsApp expirou* ou foi desconectada.\n\n"
-        "⚠️ *Ação necessária:* Vá aos logs do GitHub Actions para gerar e scanear um novo QR Code manualmente."
-    )
+    run_url = os.getenv('RUN_URL', '')
+    # SESSAO_FRESCA=1: o login no WhatsApp funcionou nesta execução (a sessão
+    # foi guardada); a falha foi no envio, não na sessão.
+    if os.getenv('SESSAO_FRESCA') == '1':
+        causa = (
+            "O login no WhatsApp funcionou e a sessão foi guardada, "
+            "mas a publicação falhou. Não é preciso novo QR Code."
+        )
+    else:
+        causa = (
+            "O WhatsApp não autenticou (sessão expirada/revogada ou WhatsApp Web não arrancou).\n"
+            "Se recebeu um QR Code neste chat, scaneie-o. Caso contrário, corra o workflow "
+            "manualmente com a opção \"pareamento\"."
+        )
 
+    alert_text = "🚨 FALHA NO BOT DE MEDITAÇÕES 🚨\n\n" + causa
+    if run_url:
+        alert_text += "\n\nLogs: " + run_url
+
+    # Texto simples (sem parse_mode): o URL e a causa contêm caracteres que
+    # o Markdown do Telegram rejeitaria.
     payload = {
         'chat_id': personal_chat_id,
         'text': alert_text,
-        'parse_mode': 'Markdown'  # Renders the text with bold styling
     }
 
     try:
