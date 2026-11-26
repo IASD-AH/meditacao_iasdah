@@ -25,7 +25,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
 
@@ -119,7 +119,9 @@ jobs:
           pip install requests==2.32.5 beautifulsoup4==4.14.2 urllib3==2.5.0
 
           # Versões fixadas em package.json/package-lock.json
-          # (whatsapp-web.js 1.34.8 corrige "getChat" undefined, id._serialized
+          # (whatsapp-web.js 1.34.8 + fix upstream #201990 "Socket", commit 38eb45b:
+          # o WA Web >= 2.3000.1055xxx já não tem WAWebSocketModel em /login/;
+          # 1.34.8 corrige "getChat" undefined, id._serialized
           # e a re-injeção da SPA que causava "Execution context was destroyed").
           npm ci --no-audit --no-fund
 
