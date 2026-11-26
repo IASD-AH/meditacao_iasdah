@@ -2,7 +2,7 @@ name: Publicar Meditação Diária no Telegram e WhatsApp
 
 on:
   schedule:
-    - cron: '13 1 * * *'
+    - cron: '13 0 * * *'
 
   workflow_dispatch:
     inputs:
