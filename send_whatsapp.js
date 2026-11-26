@@ -326,6 +326,12 @@ function criarCliente() {
         authStrategy: new LocalAuth({
             dataPath: './whatsapp_auth'
         }),
+        // A biblioteca dá apenas authTimeoutMs (30s por omissão) para o
+        // bundle do WhatsApp Web carregar e para o socket sair de
+        // OPENING/PAIRING. Com um perfil restaurado de ~55 MB num runner frio
+        // isso não chega: "auth timeout" / "Waiting failed: 30000ms
+        // exceeded" (run de 2026-11-26 17:10 UTC).
+        authTimeoutMs: 120000,
         puppeteer: {
             headless: true,
             args: [
@@ -398,7 +404,7 @@ const MAX_TENTATIVAS_INIT = 3;
 // 90s era curto para restaurar um perfil de ~55 MB (IndexedDB ~24 MB) num
 // runner partilhado. O watchdog é reiniciado a cada sinal de progresso
 // ('loading_screen', 'authenticated'), por isso só dispara num boot parado.
-const TEMPO_WATCHDOG_INIT = 150000;
+const TEMPO_WATCHDOG_INIT = 260000; // > 2 x authTimeoutMs (bundle + socket)
 
 function autenticar() {
     return new Promise((resolveCliente) => {
@@ -773,8 +779,24 @@ async function executarEnvio(client) {
 // Autentica (com retries e clientes frescos por tentativa) e só depois
 // corre o pipeline de envio. O esgotamento das tentativas de autenticação
 // faz exit(1) dentro de autenticar(); este catch cobre o resto.
+// Pareamento = ligar um dispositivo NOVO. Com o perfil antigo presente o
+// WhatsApp Web tenta retomá-lo e nunca mostra o QR. O perfil antigo é
+// posto de lado (não apagado): se o QR não for lido, nada é guardado e o
+// último artefacto continua intacto.
+function prepararPerfilLimpo() {
+    if (!fs.existsSync('./whatsapp_auth')) {
+        return;
+    }
+    const destino = `./whatsapp_auth_antigo_${Date.now()}`;
+    fs.renameSync('./whatsapp_auth', destino);
+    console.log(`Modo de pareamento: perfil anterior movido para ${destino}; a gerar QR com perfil limpo.`);
+}
+
 (async () => {
     try {
+        if (MODO_PAREAMENTO) {
+            prepararPerfilLimpo();
+        }
         const client = await autenticar();
         await executarEnvio(client);
     } catch (err) {
