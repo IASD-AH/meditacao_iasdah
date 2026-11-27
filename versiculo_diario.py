@@ -30,6 +30,9 @@ from zoneinfo import ZoneInfo
 
 FICHEIRO_VERSICULOS = Path(__file__).with_name("dados") / "versiculos_iasd_ara_5anos.json"
 FICHEIRO_WHATSAPP = Path("whatsapp_msg.txt")
+# Imagem para partilha (Facebook/Instagram); o send_whatsapp.js envia-a
+# quando WHATSAPP_IMAGEM aponta para este ficheiro.
+FICHEIRO_IMAGEM = Path("versiculo_do_dia.jpg")
 FUSO = ZoneInfo("Europe/Lisbon")
 # Lançamento oficial: dia em que é publicado o 1.º versículo (id 1). Antes
 # desta data o bot está em teste (só chat do administrador). Pode ser
@@ -145,6 +148,46 @@ def _data_inicio() -> datetime.date:
         return DATA_INICIO_PADRAO
 
 
+def gerar_imagem_do_dia(v: dict[str, str], destino: Path = FICHEIRO_IMAGEM) -> Path | None:
+    """Gera a imagem de partilha. Devolve None (e regista o erro) se falhar."""
+    try:
+        from imagem_versiculo import gerar_imagem
+        caminho = gerar_imagem(v["referencia"], v["texto"], destino)
+        print(f"Imagem gerada: {caminho} ({caminho.stat().st_size // 1024} KB).")
+        return caminho
+    except (ImportError, OSError, ValueError) as e:
+        print(f"ERRO ao gerar a imagem: {type(e).__name__}: {e}")
+        destino.unlink(missing_ok=True)  # nunca deixar uma imagem antiga para o WhatsApp
+        return None
+
+
+def enviar_foto_telegram(token: str, chat_id: str, caminho: Path) -> tuple[bool, str]:
+    """sendPhoto sem legenda (sem hashtags). O erro nunca contém o token."""
+    import requests  # import tardio, como o resto do envio
+
+    erro = ""
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            with caminho.open("rb") as f:
+                r = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",
+                                  data={"chat_id": chat_id},
+                                  files={"photo": (caminho.name, f, "image/jpeg")},
+                                  timeout=30)
+            r.raise_for_status()
+            print("Imagem enviada para o Telegram.")
+            return True, ""
+        except (requests.exceptions.RequestException, OSError) as e:
+            erro = str(e)
+            resposta = getattr(e, "response", None)
+            if resposta is not None:
+                erro += " | " + resposta.text[:300]
+            erro = erro.replace(token, "***")
+            print(f"Falha no envio da imagem (tentativa {tentativa}/{MAX_TENTATIVAS}): {erro}")
+            if tentativa < MAX_TENTATIVAS:
+                time.sleep(ESPERA_ENTRE_TENTATIVAS_S)
+    return False, erro
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true", help="mostra as mensagens sem enviar")
@@ -198,10 +241,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\n--- Telegram (MarkdownV2) ---\n" + msg_tg)
         if not args.admin_teste:
             print("\n--- WhatsApp ---\n" + msg_wa)
+        gerar_imagem_do_dia(v)
         return 0
 
     if args.admin_teste:
         # Só Telegram pessoal; o whatsapp_msg.txt das meditações fica intacto.
+        # A imagem vai para um nome próprio para nunca chegar ao WhatsApp.
         token = os.getenv("TELEGRAM_BOT_TOKEN")
         chat_admin = os.getenv("TELEGRAM_PERSONAL_CHAT_ID")
         if not token or not chat_admin:
@@ -210,11 +255,18 @@ def main(argv: list[str] | None = None) -> int:
         ok, erro = send_telegram_message(msg_tg, token, chat_admin)
         if not ok:
             print("Falha no envio de teste: " + (erro or "").replace(token, "***"))
-        return 0 if ok else 1
+        imagem = gerar_imagem_do_dia(v, Path("versiculo_teste.jpg"))
+        ok_img = bool(imagem) and enviar_foto_telegram(token, chat_admin, imagem)[0]
+        return 0 if ok and ok_img else 1
 
-    # Payload do WhatsApp primeiro: uma falha no Telegram não deve impedir o grupo.
+    # Payload do WhatsApp e imagem primeiro: uma falha no Telegram não deve
+    # impedir o grupo.
     FICHEIRO_WHATSAPP.write_text(msg_wa + "\n", encoding="utf-8")
     print(f"Payload do WhatsApp escrito em {FICHEIRO_WHATSAPP}.")
+    imagem = gerar_imagem_do_dia(v)
+    falhas: list[str] = []
+    if not imagem:
+        falhas.append("A imagem de partilha não foi gerada (ver logs).")
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -224,20 +276,27 @@ def main(argv: list[str] | None = None) -> int:
                          "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não definidos; o Telegram não foi publicado.")
         return 0  # o WhatsApp ainda corre
 
-    ultimo_erro = ""
+    texto_ok, ultimo_erro = False, ""
     for tentativa in range(1, MAX_TENTATIVAS + 1):
-        ok, erro = send_telegram_message(msg_tg, token, chat_id)
-        if ok:
-            return 0
+        texto_ok, erro = send_telegram_message(msg_tg, token, chat_id)
+        if texto_ok:
+            break
         # O erro do requests inclui o URL, que contém o token do bot.
         ultimo_erro = (erro or "").replace(token, "***")
         print(f"Falha no envio Telegram (tentativa {tentativa}/{MAX_TENTATIVAS}): {ultimo_erro}")
         if tentativa < MAX_TENTATIVAS:
             time.sleep(ESPERA_ENTRE_TENTATIVAS_S)
+    if not texto_ok:
+        falhas.append(f"Envio de {v['referencia']} para o canal Telegram falhou: {ultimo_erro}")
 
-    send_admin_alert("Falha no bot do versículo diário",
-                     f"Envio de {v['referencia']} para o canal Telegram falhou: {ultimo_erro}")
-    return 0  # o alerta já foi enviado; o WhatsApp ainda corre
+    if imagem:
+        ok_img, erro_img = enviar_foto_telegram(token, chat_id, imagem)
+        if not ok_img:
+            falhas.append(f"Envio da imagem para o canal Telegram falhou: {erro_img}")
+
+    if falhas:
+        send_admin_alert("Falha no bot do versículo diário", "\n".join(falhas))
+    return 0  # alertas já enviados; o WhatsApp ainda corre
 
 
 if __name__ == "__main__":

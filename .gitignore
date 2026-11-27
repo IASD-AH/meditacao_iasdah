@@ -19,3 +19,7 @@ whatsapp_auth_antigo_*/
 
 # Python
 __pycache__/
+
+# Imagens do versículo geradas no CI/localmente
+versiculo_do_dia.jpg
+versiculo_teste.jpg

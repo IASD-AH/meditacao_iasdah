@@ -57,6 +57,34 @@ class TestIndice(unittest.TestCase):
         self.assertEqual(vd.indice_do_dia(inicio - datetime.timedelta(days=3), inicio, 1826), 1823)
 
 
+class TestImagem(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import imagem_versiculo
+        except ImportError as e:  # Pillow só é obrigatório no CI
+            raise unittest.SkipTest(f"Pillow indisponível: {e}")
+        cls.iv = imagem_versiculo
+        cls.lista = vd.carregar_versiculos(vd.FICHEIRO_VERSICULOS)
+
+    def test_dimensoes_e_formato(self) -> None:
+        from PIL import Image
+        curto = min(self.lista, key=lambda v: len(v["texto"]))
+        longo = max(self.lista, key=lambda v: len(v["texto"]))
+        with tempfile.TemporaryDirectory() as d:
+            for v in (self.lista[0], curto, longo):
+                p = self.iv.gerar_imagem(v["referencia"], v["texto"], Path(d) / "v.jpg")
+                with Image.open(p) as im:
+                    self.assertEqual(im.size, (1080, 1350))  # 4:5, feed Instagram/Facebook
+                    self.assertEqual(im.format, "JPEG")
+                    self.assertEqual(im.mode, "RGB")
+
+    def test_todos_os_versiculos_cabem(self) -> None:
+        for v in self.lista:
+            self.iv._ajustar_texto(v["texto"], self.iv.ALTURA_TEXTO_MAX)  # ValueError se não couber
+
+
 class TestModos(unittest.TestCase):
 
     def _correr(self, *args: str) -> str:

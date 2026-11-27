@@ -861,6 +861,35 @@ async function executarEnvio(client) {
         const houveFalha = resultados.some(r => !r.enviado);
 
         // ------------------------------------------------------------
+        // IMAGEM OPCIONAL (versículo diário, para partilha nas redes)
+        // ------------------------------------------------------------
+        // WHATSAPP_IMAGEM=<ficheiro> envia essa imagem, sem legenda, depois
+        // das mensagens de texto. Não-fatal: a imagem é um extra e nunca
+        // deve marcar o job como falhado nem disparar o alerta de sessão.
+        const imagemExtra = (process.env.WHATSAPP_IMAGEM || '').trim();
+        if (imagemExtra) {
+            if (!fs.existsSync(imagemExtra)) {
+                console.error(`⚠️ Imagem ${imagemExtra} não encontrada; envio apenas o texto.`);
+            } else {
+                console.log('\n⏱️ Aguarda 10 segundos antes de enviar a imagem...');
+                await new Promise(resolve => setTimeout(resolve, 10000));
+                for (let tentativa = 1; tentativa <= 3; tentativa++) {
+                    try {
+                        const media = MessageMedia.fromFilePath(imagemExtra);
+                        await client.sendMessage(groupId, media);
+                        console.log(`✅ Imagem enviada (tentativa ${tentativa}).`);
+                        break;
+                    } catch (err) {
+                        console.error(`⚠️ Falha ao enviar a imagem (tentativa ${tentativa}, não-fatal):`, err.message || err);
+                        if (tentativa < 3) {
+                            await new Promise(resolve => setTimeout(resolve, 15000));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
         // MENSAGEM FINAL DE MOTIVAÇÃO
         // ------------------------------------------------------------
         // Além do valor devocional, atua como período de tolerância para a
