@@ -36,6 +36,8 @@ Corre inteiramente no **GitHub Actions**, sem servidor próprio. O WhatsApp é c
 | `versiculo_diario.py` | Python | Versículo do dia (14:00 de Lisboa): escolhe-o de `dados/versiculos_iasd_ara_5anos.json`, publica no Telegram e cria o payload do WhatsApp. |
 | `.github/workflows/versiculo_diario.yml` | YAML | Orquestração do versículo diário, com os mesmos secrets e a mesma sessão WhatsApp. |
 | `dados/versiculos_iasd_ara_5anos.json` | JSON | Plano de 5 anos: 1826 versículos ARA (`id`, `referencia`, `texto`, `tema`). |
+| `imagem_versiculo.py` | Python | Imagem do versículo para partilha no Facebook/Instagram: 1080×1350 px (4:5), JPEG, sem hashtags. Pillow. |
+| `fontes/` | TTF | Lora e Montserrat (SIL Open Font License, ver `OFL-*.txt`), usadas na imagem. |
 | `tests/` | Python | Testes do versículo diário: `python -m unittest discover -s tests`. |
 | `package.json` / `package-lock.json` | — | Dependências Node fixadas (instaladas com `npm ci`). |
 
@@ -95,6 +97,7 @@ Uma sessão revogada nunca é guardada por cima da última sessão boa.
 * **Agendamento (depois do lançamento):** 14:00 de Lisboa. O cron é em UTC e Portugal muda de hora, por isso há dois crons (13:00 e 14:00 UTC); o job `horario` deixa passar só o que corresponde às 14:00 de Lisboa nesse dia. Também aqui o GitHub pode atrasar o arranque.
 * **Escolha:** índice = (dias desde `VERSICULOS_DATA_INICIO`, data de Lisboa) mod 1826. Sem estado: re-execuções no mesmo dia repetem o versículo; o ciclo recomeça sozinho ao fim de 5 anos.
 * **Envio:** `versiculo_diario.py` publica no canal Telegram e escreve `whatsapp_msg.txt`; `send_whatsapp.js` envia-o ao grupo com `WHATSAPP_MOTIVACAO=0` (sem a mensagem de motivação da manhã).
+* **Segunda publicação, imagem:** logo a seguir ao texto, uma imagem 1080×1350 px (formato 4:5 do feed do Instagram, mostrado inteiro no Facebook) só com o versículo, a referência e a versão, sem hashtags, pronta a partilhar. Telegram via `sendPhoto`; WhatsApp via `WHATSAPP_IMAGEM`. Na fase de teste vai, com o texto, só para o chat do administrador. Uma falha na imagem nunca impede o texto e gera um alerta.
 * **Sessão:** restaura e guarda o mesmo artefacto `whatsapp-session`. Usa o mesmo grupo de `concurrency` das meditações, por isso os dois workflows nunca correm em simultâneo. O pareamento continua a ser feito no workflow das meditações.
 * **Teste local:** `python versiculo_diario.py --dry-run [--data AAAA-MM-DD]`.
 
