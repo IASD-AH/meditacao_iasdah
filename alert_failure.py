@@ -28,7 +28,8 @@ def send_telegram_alert():
             "manualmente com a opção \"pareamento\"."
         )
 
-    alert_text = "🚨 FALHA NO BOT DE MEDITAÇÕES 🚨\n\n" + causa
+    bot_nome = os.getenv('BOT_NOME', 'BOT DE MEDITAÇÕES')
+    alert_text = f"🚨 FALHA NO {bot_nome} 🚨\n\n" + causa
     if run_url:
         alert_text += "\n\nLogs: " + run_url
 

@@ -33,6 +33,10 @@ Corre inteiramente no **GitHub Actions**, sem servidor próprio. O WhatsApp é c
 | `session_manager.py` | Python | Gestão da sessão do WhatsApp no CI: `restore`, `recuperar`, `health`, `clean`, `compress`, `clear`. |
 | `alert_failure.py` | Python | Alerta no Telegram pessoal quando um passo do workflow falha. Distingue falha de login de falha de envio. |
 | `.github/workflows/meditacao_diaria.yml` | YAML | Orquestração diária: sessão, dependências, publicação, alertas e gravação da sessão. |
+| `versiculo_diario.py` | Python | Versículo do dia (14:00 de Lisboa): escolhe-o de `dados/versiculos_iasd_ara_5anos.json`, publica no Telegram e cria o payload do WhatsApp. |
+| `.github/workflows/versiculo_diario.yml` | YAML | Orquestração do versículo diário, com os mesmos secrets e a mesma sessão WhatsApp. |
+| `dados/versiculos_iasd_ara_5anos.json` | JSON | Plano de 5 anos: 1826 versículos ARA (`id`, `referencia`, `texto`, `tema`). |
+| `tests/` | Python | Testes do versículo diário: `python -m unittest discover -s tests`. |
 | `package.json` / `package-lock.json` | — | Dependências Node fixadas (instaladas com `npm ci`). |
 
 ## 🔧 Como Funciona
@@ -84,6 +88,16 @@ Ficheiro: `.github/workflows/meditacao_diaria.yml`.
 
 Uma sessão revogada nunca é guardada por cima da última sessão boa.
 
+### Versículo diário — `.github/workflows/versiculo_diario.yml`
+
+* **Lançamento oficial: 01-01-2027** (`VERSICULOS_DATA_INICIO`), com o versículo n.º 1.
+* **Fase de teste (até ao lançamento):** o workflow das meditações envia o versículo do dia **só para o chat pessoal do administrador** (passo *Versículo diário (teste…)*, que nunca falha o job). O workflow das 14:00 não publica nada; corrido à mão, também envia só para o administrador.
+* **Agendamento (depois do lançamento):** 14:00 de Lisboa. O cron é em UTC e Portugal muda de hora, por isso há dois crons (13:00 e 14:00 UTC); o job `horario` deixa passar só o que corresponde às 14:00 de Lisboa nesse dia. Também aqui o GitHub pode atrasar o arranque.
+* **Escolha:** índice = (dias desde `VERSICULOS_DATA_INICIO`, data de Lisboa) mod 1826. Sem estado: re-execuções no mesmo dia repetem o versículo; o ciclo recomeça sozinho ao fim de 5 anos.
+* **Envio:** `versiculo_diario.py` publica no canal Telegram e escreve `whatsapp_msg.txt`; `send_whatsapp.js` envia-o ao grupo com `WHATSAPP_MOTIVACAO=0` (sem a mensagem de motivação da manhã).
+* **Sessão:** restaura e guarda o mesmo artefacto `whatsapp-session`. Usa o mesmo grupo de `concurrency` das meditações, por isso os dois workflows nunca correm em simultâneo. O pareamento continua a ser feito no workflow das meditações.
+* **Teste local:** `python versiculo_diario.py --dry-run [--data AAAA-MM-DD]`.
+
 ## ⚙️ Configuração
 
 ### Secrets (`Settings > Secrets and variables > Actions > Secrets`)
@@ -98,10 +112,11 @@ Uma sessão revogada nunca é guardada por cima da última sessão boa.
 
 Mudar a `WHATSAPP_SESSION_KEY` torna ilegíveis as sessões já guardadas e obriga a novo pareamento.
 
-### Variável opcional (`Settings > Secrets and variables > Actions > Variables`)
+### Variáveis opcionais (`Settings > Secrets and variables > Actions > Variables`)
 
 | Variável | Descrição |
 | :--- | :--- |
+| `VERSICULOS_DATA_INICIO` | Dia em que é publicado o versículo n.º 1 (`AAAA-MM-DD`). Por omissão `2027-01-01` (lançamento oficial; antes disso, só testes no chat do administrador). |
 | `WHATSAPP_WEB_VERSION` | Fixa a versão do WhatsApp Web em todas as tentativas (ex.: `2.3000.1056418802-alpha`). É um recurso de emergência; por omissão, deixe-a por definir. |
 
 ## 🔐 Pareamento do WhatsApp (QR Code)

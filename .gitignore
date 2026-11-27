@@ -16,3 +16,6 @@ whatsapp-session.tar.gz*
 whatsapp_auth_backup/
 .session_fresh
 whatsapp_auth_antigo_*/
+
+# Python
+__pycache__/

@@ -154,6 +154,10 @@ function marcarSessaoInvalida(reason) {
 // se perdeu e é preciso religar o bot ao WhatsApp.
 const MODO_PAREAMENTO = process.env.WHATSAPP_PAREAMENTO === '1';
 
+// WHATSAPP_MOTIVACAO=0 desliga a mensagem final de motivação (pensada para
+// as meditações da manhã). Usado pelo workflow do versículo diário.
+const ENVIAR_MOTIVACAO = process.env.WHATSAPP_MOTIVACAO !== '0';
+
 // Mensagens finais de motivação para a leitura diária. Enviada após a
 // última meditação. Uma por dia, em rotação (ver motivacaoDoDia).
 const MOTIVACOES = [
@@ -866,10 +870,14 @@ async function executarEnvio(client) {
         // após o último envio matava essa entrega — era por isso que a 3ª
         // meditação nunca chegava ao grupo. Os 20s de espera + a própria
         // mensagem de motivação garantem esse intervalo.
-        console.log('\n⏱️ Aguarda 20 segundos antes da mensagem final de motivação...');
+        // A espera mantém-se mesmo sem motivação: é o período de entrega
+        // da última mensagem antes do destroy().
+        console.log('\n⏱️ Aguarda 20 segundos antes da mensagem final de motivação / encerramento...');
         await new Promise(resolve => setTimeout(resolve, 20000));
 
-        try {
+        if (!ENVIAR_MOTIVACAO) {
+            console.log('Mensagem de motivação desligada (WHATSAPP_MOTIVACAO=0).');
+        } else try {
             const indice = indiceMotivacaoDoDia();
             const motivacao = MOTIVACOES[indice];
             console.log(`Mensagem de motivação do dia: ${indice + 1}/${MOTIVACOES.length}.`);
