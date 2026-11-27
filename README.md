@@ -19,7 +19,7 @@ Este projeto foi criado para automatizar a tarefa diária de copiar, formatar e 
 * **Autenticação Resiliente (fábrica de clientes):** Até **3 tentativas de 90s**, cada uma com um `Client` novo — nunca se re-inicializa uma instância destruída (evita o crash `Target closed`) — com watchdog por tentativa e `initialize()` sempre capturado. O `webVersionCache` está pinado à versão *current* do WhatsApp Web, com instruções de manutenção no código.
 * **Modo de Pareamento (`WHATSAPP_PAREAMENTO=1`):** Executa apenas a autenticação — desenha o QR no terminal, guarda a sessão em `./whatsapp_auth` e sai; não exige payload nem ID de grupo. Ideal para religar o bot quando o artefacto da sessão se perde.
 * **Persistência de Sessão sem Custos:** Utiliza emulação headless (WhatsApp Web) guardada de forma encriptada através de *Artifacts* do GitHub Actions (retenção de 90 dias, com overwrite), contornando as restrições e custos da API Business oficial da Meta.
-* **Alertas de Falha Multi-Canal:** Falhas de scraping, envio ou autenticação disparam e-mail (Gmail) e alerta imediato no Telegram pessoal (`alert_failure.py`), com instruções de ação.
+* **Alertas de Falha pelo Bot no Telegram:** Falhas de scraping ou envio geram um único alerta por execução no Telegram pessoal (`meditacao_iasdah.py`); falhas de autenticação/envio no WhatsApp disparam `alert_failure.py`. Todos incluem a causa e o link para os logs.
 
 ## 🔧 Como Funciona
 
@@ -62,9 +62,8 @@ Para que a automação seja executada na nuvem de forma segura, deve configurar 
 | `TELEGRAM_BOT_TOKEN` | Token numérico longo fornecido pelo `@BotFather` ao criar o bot. |
 | `TELEGRAM_CHAT_ID` | ID numérico do grupo/canal do Telegram (ex: `-100XXXXXXXXXX`). |
 | `WHATSAPP_GROUP_ID` | ID nativo de infraestrutura do grupo da Comunidade (ex: `1203630XXXXXXXXX@g.us`). |
-| `TELEGRAM_PERSONAL_CHAT_ID` | O seu ID pessoal (via `@userinfobot`) para receber alertas imediatos caso a sessão do WhatsApp caia. |
-| `EMAIL_ADDRESS` | O seu endereço de e-mail para logs de erro alternativos. |
-| `GMAIL_APP_PASSWORD` | Password de aplicação gerada na sua conta Google para envio de e-mails de alerta. |
+| `TELEGRAM_PERSONAL_CHAT_ID` | O seu ID pessoal (via `@userinfobot`) para receber os alertas de falha do bot e o QR Code de pareamento do WhatsApp. |
+| `WHATSAPP_SESSION_KEY` | Chave aleatória longa (ex.: `openssl rand -base64 48`) usada para cifrar a sessão do WhatsApp guardada nos artefactos. |
 
 ## 🗓️ Automação com GitHub Actions
 O fluxo está totalmente automatizado para acordar todas as manhãs na nuvem do GitHub. O ficheiro de configuração do workflow encontra-se em .github/workflows/meditacao_diaria.yml e possui a seguinte estrutura de produção:

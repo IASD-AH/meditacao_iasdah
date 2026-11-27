@@ -1,8 +1,5 @@
 import requests
 import os
-import smtplib
-import ssl
-from email.message import EmailMessage
 import time
 from bs4 import BeautifulSoup
 import datetime
@@ -13,7 +10,6 @@ from urllib.parse import urljoin
 # --- CONFIGURAÇÕES ---
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 20
-EMAIL_RECEIVER = "filmfer@gmail.com"
 # O ficheiro whatsapp_msg.txt é recriado vazio no início de cada execução
 # e mantido no fim: é o payload consumido pelo send_whatsapp.js.
 
@@ -31,29 +27,50 @@ def format_date_in_portuguese(date_obj):
     
     return f"{weekday}, {day} de {month}"
 
-def send_error_email(subject, body):
-    """Envia um email de notificação de erro interno de processamento/scraping."""
-    email_sender = os.getenv('EMAIL_ADDRESS')
-    email_password = os.getenv('GMAIL_APP_PASSWORD')
+TELEGRAM_MAX_CHARS = 4000  # limite da API é 4096
 
-    if not email_sender or not email_password:
-        print("ERRO CRÍTICO: Variáveis de ambiente para envio de email não definidas.")
+
+def _url_da_execucao() -> str:
+    """Link para os logs desta execução no GitHub Actions (vazio fora do CI)."""
+    servidor = os.getenv("GITHUB_SERVER_URL")
+    repo = os.getenv("GITHUB_REPOSITORY")
+    run_id = os.getenv("GITHUB_RUN_ID")
+    if servidor and repo and run_id:
+        return f"{servidor}/{repo}/actions/runs/{run_id}"
+    return ""
+
+
+def send_admin_alert(subject: str, body: str) -> None:
+    """Envia um alerta do bot (IASD AH Bot) para o chat pessoal do administrador no Telegram.
+
+    Substitui os antigos alertas por email. Texto simples (sem parse_mode),
+    porque os erros contêm caracteres que o Markdown do Telegram rejeita.
+    Nunca lança: uma falha no alerta não pode interromper a publicação.
+    """
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_PERSONAL_CHAT_ID")
+    if not bot_token or not chat_id:
+        print("AVISO: TELEGRAM_BOT_TOKEN/TELEGRAM_PERSONAL_CHAT_ID não definidos; alerta não enviado: " + subject)
         return
 
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg['Subject'] = subject
-    msg['From'] = email_sender
-    msg['To'] = EMAIL_RECEIVER
+    texto = "🚨 " + subject + "\n\n" + body
+    run_url = _url_da_execucao()
+    if run_url:
+        texto += "\n\nLogs: " + run_url
+    if len(texto) > TELEGRAM_MAX_CHARS:
+        texto = texto[:TELEGRAM_MAX_CHARS - 20] + "\n…(truncado)"
 
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-            server.login(email_sender, email_password)
-            server.send_message(msg)
-            print(f"Email de notificação de erro enviado com sucesso para {EMAIL_RECEIVER}.")
-    except Exception as e:
-        print(f"Falha catastrófica ao enviar o email de notificação: {e}")
+        resposta = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": texto},
+            timeout=15,
+        )
+        resposta.raise_for_status()
+        print("Alerta enviado para o Telegram pessoal: " + subject)
+    except requests.exceptions.RequestException as e:
+        # Não imprimir a exceção completa: o URL contém o token do bot.
+        print(f"Falha ao enviar o alerta para o Telegram ({type(e).__name__}).")
 
 def escape_markdown(text: str) -> str:
     """Escapa caracteres especiais apenas para o modo MarkdownV2 do Telegram."""
@@ -218,7 +235,7 @@ if __name__ == "__main__":
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("ERRO CRÍTICO: As variáveis de ambiente do Telegram não foram definidas.")
-        send_error_email(
+        send_admin_alert(
             "Falha Crítica no Bot de Meditações",
             "O bot não pôde ser executado porque as variáveis de ambiente TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não foram encontradas."
         )
@@ -230,6 +247,8 @@ if __name__ == "__main__":
         ]
 
         resultados = []
+        # Detalhes de cada falha; enviados num ÚNICO alerta no fim da execução.
+        detalhes_falhas = []
 
         # Payload do WhatsApp começa vazio em cada execução; cada meditação
         # bem-sucedida é acrescentada (modo "a") no ciclo abaixo.
@@ -264,10 +283,7 @@ if __name__ == "__main__":
 
             if not scraping_ok:
                 print("ERRO FINAL: Scraping para '" + title + "' falhou após " + str(MAX_RETRIES) + " tentativas.")
-                send_error_email(
-                    "Falha no Scraping da Meditação: " + title,
-                    "O bot não conseguiu extrair o conteúdo para a meditação '" + title + "'.\n\nÚltimo erro registado:\n" + last_scrape_error
-                )
+                detalhes_falhas.append("• Scraping de '" + title + "' falhou após " + str(MAX_RETRIES) + " tentativas: " + last_scrape_error)
                 resultados.append((title, False, False, False))
                 continue
 
@@ -285,10 +301,7 @@ if __name__ == "__main__":
 
             if not telegram_ok:
                 print("ERRO FINAL: Envio para o Telegram para '" + title + "' falhou.")
-                send_error_email(
-                    "Falha no Envio para o Telegram: " + title,
-                    "O bot não conseguiu enviar a meditação '" + title + "' para o Telegram.\n\nÚltimo erro registado:\n" + last_send_error
-                )
+                detalhes_falhas.append("• Envio de '" + title + "' para o canal Telegram falhou: " + last_send_error)
 
             # --- SALVAR PAYLOAD DO WHATSAPP ---
             whatsapp_ok = True
@@ -319,10 +332,12 @@ if __name__ == "__main__":
             print("\n✅ Todas as 3 meditações foram processadas com sucesso.")
         else:
             print("\n⚠️  Alguma(s) meditação(ões) falhou(ram). O WhatsApp recebe apenas as que tiveram sucesso.")
-            linhas_email = ["Nem todas as 3 meditações foram processadas com sucesso.\n\nResultados:"]
+            linhas = ["Nem todas as 3 meditações foram processadas com sucesso.", "", "Resultados:"]
             for t, s, tg, w in resultados:
-                linhas_email.append("  " + t + ": scraping=[" + ("OK" if s else "FALHA") + "] telegram=[" + ("OK" if tg else "FALHA") + "] whatsapp=[" + ("OK" if w else "FALHA") + "]")
-            send_error_email(
+                linhas.append("  " + t + ": scraping=[" + ("OK" if s else "FALHA") + "] telegram=[" + ("OK" if tg else "FALHA") + "] whatsapp=[" + ("OK" if w else "FALHA") + "]")
+            if detalhes_falhas:
+                linhas += ["", "Detalhes:"] + detalhes_falhas
+            send_admin_alert(
                 "Falha parcial no processamento das meditações",
-                "\n".join(linhas_email)
+                "\n".join(linhas)
             )
