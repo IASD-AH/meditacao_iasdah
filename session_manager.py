@@ -31,6 +31,10 @@ CACHES = [
     "session/Default/Code Cache",
     "session/Default/GPUCache",
     "session/Default/Crashpad",
+    # Cópia da app WhatsApp Web (Service Worker). Não contém o login (que
+    # está em IndexedDB/Local Storage); guardá-la faz arrancar uma versão
+    # antiga da app no dia seguinte e engorda o artefacto (23 -> 43 MB).
+    "session/Default/Service Worker",
 ]
 
 ARTEFACTO_RETENCAO_DIAS = 90
