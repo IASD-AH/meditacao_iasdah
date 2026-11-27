@@ -788,12 +788,9 @@ async function executarEnvio(client) {
             // preview de links de forma fiável; a imagem garante o thumbnail
             // visual e o link do YouTube na caption continua clicável.
             //
-            // A caption de mídia tem um limite prático de ~1024 caracteres
-            // (documentado na Cloud API; no Web, o excesso é truncado
-            // silenciosamente). Textos acima do limite seguem logo o
-            // caminho de recurso: miniatura com legenda curta + texto numa
-            // mensagem própria — para nunca circular texto cortado.
-            const LIMITE_CAPTION = 1024;
+            // Não há limite de tamanho aplicado à caption: o limite de ~1024
+            // caracteres é da Cloud API da Meta, não do WhatsApp Web, que
+            // entregou captions de ~2000 caracteres completas (2026-11-26/27).
             let miniatura = null;
             const videoId = extrairVideoId(mensagemLimpa);
             if (videoId) {
