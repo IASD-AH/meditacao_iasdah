@@ -32,8 +32,20 @@ const FRESH_MARKER = './.session_fresh';
 // transitórios: registamos e deixamos o watchdog/retry decidir.
 const ERROS_NAVEGACAO = /Execution context was destroyed|Target closed|Session closed|detached Frame/i;
 
+// Quando o WhatsApp Web navega/recarrega, a biblioteca re-injeta-se fora do
+// initialize(); se essa re-injeção esgota o authTimeoutMs, o erro chega aqui
+// como rejeição sem tratamento ("auth timeout" / "Waiting failed"). Em vez
+// de esperar mais ~2 min pelo watchdog, a tentativa em curso termina já.
+const ERROS_INJECAO = /auth timeout|Waiting failed/i;
+let abortarTentativaAtual = null;
+
 process.on('unhandledRejection', (reason) => {
     const msg = (reason && reason.message) || String(reason);
+    if (ERROS_INJECAO.test(msg) && abortarTentativaAtual) {
+        console.error('Re-injeção do WhatsApp Web falhou:', msg, '— a terminar a tentativa já.');
+        abortarTentativaAtual('inject_timeout');
+        return;
+    }
     console.error('Aviso: promessa rejeitada sem tratamento (ignorada):', msg);
 });
 
@@ -322,9 +334,11 @@ async function descarregarMiniatura(videoId) {
 // as execuções desde então). Para fixar uma versão em caso de emergência,
 // definir WHATSAPP_WEB_VERSION (ex.: 2.3000.1056346120-alpha) com a versão
 // "current" de https://wppconnect.io/whatsapp-versions.
-function configVersaoWeb() {
-    const versao = (process.env.WHATSAPP_WEB_VERSION || '').trim();
-    if (!/^[0-9.]+(-alpha|-beta)?$/.test(versao)) {
+const VERSAO_WEB_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-alpha|-beta)?$/;
+
+function configVersaoWeb(versaoForcada) {
+    const versao = (versaoForcada || process.env.WHATSAPP_WEB_VERSION || '').trim();
+    if (!VERSAO_WEB_RE.test(versao)) {
         return { webVersionCache: { type: 'none' } };
     }
     console.log(`A usar WhatsApp Web fixado em ${versao}.`);
@@ -337,9 +351,31 @@ function configVersaoWeb() {
     };
 }
 
-function criarCliente() {
+// Versão "current" publicada pelo catálogo wppconnect (o mesmo que o pin
+// manual usa). Devolve null se não for possível obtê-la — nunca lança.
+async function obterVersaoWebAtual() {
+    const url = 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/versions.json';
+    try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) {
+            console.error(`Catálogo de versões indisponível (HTTP ${res.status}).`);
+            return null;
+        }
+        const versao = String((await res.json()).currentVersion || '').trim();
+        if (!VERSAO_WEB_RE.test(versao)) {
+            console.error('Catálogo de versões devolveu um valor inválido:', versao.slice(0, 40));
+            return null;
+        }
+        return versao;
+    } catch (err) {
+        console.error('Falha ao obter a versão atual do WhatsApp Web:', err.message || err);
+        return null;
+    }
+}
+
+function criarCliente(versaoForcada) {
     return new Client({
-        ...configVersaoWeb(),
+        ...configVersaoWeb(versaoForcada),
         authStrategy: new LocalAuth({
             dataPath: './whatsapp_auth'
         }),
@@ -417,6 +453,78 @@ async function libertarCliente(client) {
 // e crasha a reinicialização com "Target closed" (falha do run de
 // 2026-09-06). O watchdog de 90s fecha cada tentativa; falhas
 // transitórias de rede/boot são absorvidas sem gastar o run inteiro.
+// ------------------------------------------------------------
+// CACHE DA APLICAÇÃO WEB NO PERFIL RESTAURADO
+// ------------------------------------------------------------
+// O perfil guardado inclui a cópia da app WhatsApp Web servida pelo Service
+// Worker. Quando o WhatsApp publica versões novas (várias por dia em
+// novembro/2026), essa cópia antiga arranca, deteta que está desatualizada e
+// recarrega — e a re-injeção da biblioteca esgota o tempo (run de 2026-11-27).
+// O login vive em IndexedDB/Local Storage, que NÃO são tocados aqui.
+const CACHES_WEB_APP = [
+    'Service Worker',
+    'Cache',
+    'Code Cache',
+    'GPUCache'
+];
+
+function limparCacheWebApp() {
+    for (const nome of CACHES_WEB_APP) {
+        const caminho = `./whatsapp_auth/session/Default/${nome}`;
+        try {
+            if (fs.existsSync(caminho)) {
+                fs.rmSync(caminho, { recursive: true, force: true });
+                console.log(`Cache da app web removida: ${nome}`);
+            }
+        } catch (err) {
+            console.error(`Aviso: não foi possível remover ${nome}:`, err.message || err);
+        }
+    }
+}
+
+// ------------------------------------------------------------
+// DIAGNÓSTICO DA PÁGINA NUMA TENTATIVA FALHADA
+// ------------------------------------------------------------
+// Só texto e só factos estruturais (rota, título, versão, presença de
+// elementos conhecidos). NUNCA conteúdo de conversas nem capturas de ecrã:
+// os logs deste repositório são públicos.
+async function diagnosticarPagina(client) {
+    const page = client.pupPage;
+    if (!page || page.isClosed()) {
+        console.error('Diagnóstico: página indisponível (browser não arrancou ou já fechou).');
+        return;
+    }
+    try {
+        const info = await Promise.race([
+            page.evaluate(() => {
+                const texto = (document.body && document.body.innerText) || '';
+                const temTexto = (re) => re.test(texto);
+                const naListaDeConversas = !!document.querySelector('#pane-side');
+                return {
+                    rota: location.pathname,
+                    titulo: document.title,
+                    versaoWeb: (window.Debug && window.Debug.VERSION) || null,
+                    requireDisponivel: typeof window.require === 'function',
+                    qrVisivel: !!document.querySelector('[data-ref], canvas[aria-label]'),
+                    listaDeConversas: naListaDeConversas,
+                    ecraContinuarWeb: temTexto(/Continue to WhatsApp Web|Continuar para o WhatsApp Web|Usar o WhatsApp Web/i),
+                    ecraAtualizar: temTexto(/update|atualiz|actualiz/i) && !naListaDeConversas,
+                    ecraCarregamento: !!document.querySelector('progress, [role="progressbar"]'),
+                    // Rótulos de botões só fora da lista de conversas (sem dados pessoais).
+                    botoes: naListaDeConversas ? [] : Array.from(document.querySelectorAll('button, [role="button"]'))
+                        .map((b) => (b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 40))
+                        .filter(Boolean)
+                        .slice(0, 6)
+                };
+            }),
+            new Promise((_, rejeitar) => setTimeout(() => rejeitar(new Error('timeout de 10s')), 10000))
+        ]);
+        console.error('Diagnóstico da página:', JSON.stringify(info));
+    } catch (err) {
+        console.error('Diagnóstico da página falhou:', err.message || err);
+    }
+}
+
 const MAX_TENTATIVAS_INIT = 3;
 // 90s era curto para restaurar um perfil de ~55 MB (IndexedDB ~24 MB) num
 // runner partilhado. O watchdog é reiniciado a cada sinal de progresso
@@ -427,7 +535,17 @@ function autenticar() {
     return new Promise((resolveCliente) => {
         (async () => {
             for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_INIT; tentativa++) {
-                const client = criarCliente();
+                // Última tentativa sem pin manual: fixa a versão "current" do
+                // catálogo (o contorno recomendado upstream quando o WhatsApp
+                // serve uma build que a biblioteca ainda não suporta).
+                let versaoForcada = null;
+                if (tentativa === MAX_TENTATIVAS_INIT && !VERSAO_WEB_RE.test((process.env.WHATSAPP_WEB_VERSION || '').trim())) {
+                    versaoForcada = await obterVersaoWebAtual();
+                    if (versaoForcada) {
+                        console.log(`Última tentativa: a fixar automaticamente o WhatsApp Web na versão atual ${versaoForcada}.`);
+                    }
+                }
+                const client = criarCliente(versaoForcada);
                 let autenticado = false;
                 let qrTimeout = null;
 
@@ -448,6 +566,10 @@ function autenticar() {
                     const rearmarWatchdog = () => {
                         clearTimeout(watchdog);
                         watchdog = setTimeout(() => resolve('timeout'), TEMPO_WATCHDOG_INIT);
+                    };
+                    abortarTentativaAtual = (motivo) => {
+                        clearTimeout(watchdog);
+                        resolve(motivo);
                     };
 
                     client.on('loading_screen', (percent, message) => {
@@ -541,6 +663,8 @@ function autenticar() {
                     });
                 });
 
+                abortarTentativaAtual = null;
+
                 if (resultado === 'ready') {
                     console.log(`✅ WhatsApp autenticado (tentativa ${tentativa}/${MAX_TENTATIVAS_INIT}).`);
                     resolveCliente(client);
@@ -551,6 +675,7 @@ function autenticar() {
                 // contrário dispara process.exit(1) durante a próxima tentativa.
                 limparQrTimeout();
                 console.error(`Tentativa ${tentativa}/${MAX_TENTATIVAS_INIT} falhou (${resultado}). A destruir o cliente e a tentar de novo...`);
+                await diagnosticarPagina(client);
                 finalizando = true; // o destroy() não é uma desconexão real
                 await libertarCliente(client);
                 finalizando = false;
@@ -815,6 +940,8 @@ function prepararPerfilLimpo() {
     try {
         if (MODO_PAREAMENTO) {
             prepararPerfilLimpo();
+        } else {
+            limparCacheWebApp();
         }
         const client = await autenticar();
         await executarEnvio(client);
