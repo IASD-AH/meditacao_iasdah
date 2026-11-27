@@ -24,35 +24,49 @@ concurrency:
 
 jobs:
 
+  # modo = publico | teste | saltar
+  #   Antes do lançamento (VERSICULOS_DATA_INICIO, por omissão 2027-01-01):
+  #     agendado -> saltar (o teste diário vai no workflow das meditações);
+  #     manual   -> teste (só chat pessoal do administrador, sem WhatsApp).
+  #   Depois do lançamento: publico (canal Telegram + grupo WhatsApp).
   horario:
     runs-on: ubuntu-latest
     outputs:
-      publicar: ${{ steps.verificar.outputs.publicar }}
+      modo: ${{ steps.verificar.outputs.modo }}
     steps:
-      - name: Verificar se são 14:00 em Lisboa
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decidir modo (hora de Lisboa e fase de lançamento)
         id: verificar
         env:
           EVENTO: ${{ github.event_name }}
           CRON: ${{ github.event.schedule }}
+          VERSICULOS_DATA_INICIO: ${{ vars.VERSICULOS_DATA_INICIO }}
         run: |
+          FASE=$(python3 versiculo_diario.py --fase)
+          echo "Fase: $FASE"
           if [ "$EVENTO" != "schedule" ]; then
-            echo "publicar=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if [ "$(TZ=Europe/Lisbon date +%z)" = "+0100" ]; then
-            ESPERADO='0 13 * * *'
+            if [ "$FASE" = "teste" ]; then MODO=teste; else MODO=publico; fi
           else
-            ESPERADO='0 14 * * *'
+            if [ "$(TZ=Europe/Lisbon date +%z)" = "+0100" ]; then
+              ESPERADO='0 13 * * *'
+            else
+              ESPERADO='0 14 * * *'
+            fi
+            echo "Cron que disparou: '$CRON' | esperado hoje: '$ESPERADO'"
+            if [ "$CRON" = "$ESPERADO" ] && [ "$FASE" = "lancado" ]; then
+              MODO=publico
+            else
+              MODO=saltar
+            fi
           fi
-          echo "Cron que disparou: '$CRON' | esperado hoje: '$ESPERADO'"
-          if [ "$CRON" = "$ESPERADO" ]; then
-            echo "publicar=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publicar=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Modo: $MODO"
+          echo "modo=$MODO" >> "$GITHUB_OUTPUT"
 
   publicar:
     needs: horario
-    if: ${{ needs.horario.outputs.publicar == 'true' }}
+    if: ${{ needs.horario.outputs.modo != 'saltar' }}
 
     runs-on: ubuntu-latest
 
@@ -86,6 +100,7 @@ jobs:
       ############################################################
 
       - name: Restaurar sessão WhatsApp
+        if: ${{ needs.horario.outputs.modo == 'publico' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WHATSAPP_SESSION_KEY: ${{ secrets.WHATSAPP_SESSION_KEY }}
@@ -113,6 +128,7 @@ jobs:
           ls -lh whatsapp-session*.tar.gz
 
       - name: Extrair e validar sessão
+        if: ${{ needs.horario.outputs.modo == 'publico' }}
         run: |
           python session_manager.py restore --forcar || \
             python session_manager.py recuperar --forcar || true
@@ -141,13 +157,20 @@ jobs:
           TELEGRAM_PERSONAL_CHAT_ID: ${{ secrets.TELEGRAM_PERSONAL_CHAT_ID }}
           # Opcional (variável do repositório): dia do versículo n.º 1, AAAA-MM-DD.
           VERSICULOS_DATA_INICIO: ${{ vars.VERSICULOS_DATA_INICIO }}
-        run: python versiculo_diario.py
+          MODO: ${{ needs.horario.outputs.modo }}
+        run: |
+          if [ "$MODO" = "teste" ]; then
+            python versiculo_diario.py --admin-teste
+          else
+            python versiculo_diario.py
+          fi
 
       ############################################################
-      # WHATSAPP
+      # WHATSAPP (só depois do lançamento)
       ############################################################
 
       - name: Enviar WhatsApp
+        if: ${{ needs.horario.outputs.modo == 'publico' }}
         env:
           WHATSAPP_GROUP_ID: ${{ secrets.WHATSAPP_GROUP_ID }}
           WHATSAPP_PAREAMENTO: '0'

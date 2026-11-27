@@ -1,5 +1,7 @@
 """Testes do versiculo_diario.py. Correr: python -m unittest discover -s tests"""
+import contextlib
 import datetime
+import io
 import json
 import sys
 import tempfile
@@ -45,11 +47,37 @@ class TestCarregar(unittest.TestCase):
 class TestIndice(unittest.TestCase):
 
     def test_rotacao(self) -> None:
-        inicio = datetime.date(2026, 11, 28)
+        inicio = vd.DATA_INICIO_PADRAO
+        self.assertEqual(inicio, datetime.date(2027, 1, 1))
         self.assertEqual(vd.indice_do_dia(inicio, inicio, 1826), 0)
         self.assertEqual(vd.indice_do_dia(inicio + datetime.timedelta(days=1), inicio, 1826), 1)
         self.assertEqual(vd.indice_do_dia(inicio + datetime.timedelta(days=1826), inicio, 1826), 0)
-        self.assertEqual(vd.indice_do_dia(inicio - datetime.timedelta(days=3), inicio, 1826), 0)
+        # Fase de teste: roda pelos últimos do ciclo e cai no 1.º no lançamento.
+        self.assertEqual(vd.indice_do_dia(inicio - datetime.timedelta(days=1), inicio, 1826), 1825)
+        self.assertEqual(vd.indice_do_dia(inicio - datetime.timedelta(days=3), inicio, 1826), 1823)
+
+
+class TestModos(unittest.TestCase):
+
+    def _correr(self, *args: str) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(vd.main(list(args)), 0)
+        return buf.getvalue()
+
+    def test_fase(self) -> None:
+        self.assertEqual(self._correr("--fase", "--data", "2026-12-31").strip(), "teste")
+        self.assertEqual(self._correr("--fase", "--data", "2027-01-01").strip(), "lancado")
+
+    def test_admin_teste_antes_do_lancamento(self) -> None:
+        out = self._correr("--admin-teste", "--dry-run", "--data", "2026-12-31")
+        self.assertIn("TESTE", out)
+        self.assertIn("1826/1826", out)
+        self.assertNotIn("--- WhatsApp ---", out)
+
+    def test_admin_teste_inativo_depois_do_lancamento(self) -> None:
+        out = self._correr("--admin-teste", "--data", "2027-01-01")
+        self.assertIn("modo de teste inativo", out)
 
 
 class TestFormatacao(unittest.TestCase):

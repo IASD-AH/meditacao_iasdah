@@ -5,10 +5,16 @@ Escolhe o versículo do dia a partir de dados/versiculos_iasd_ara_5anos.json:
 Sem estado entre execuções: re-execuções no mesmo dia publicam o mesmo
 versículo e o ciclo recomeça sozinho ao fim de N dias.
 
-Publica no canal Telegram e escreve whatsapp_msg.txt, consumido a seguir
-pelo send_whatsapp.js (mesmo formato do bot das meditações).
+Modos:
+    (normal)        publica no canal Telegram e escreve whatsapp_msg.txt,
+                    consumido a seguir pelo send_whatsapp.js.
+    --admin-teste   antes do lançamento: envia o versículo só para o chat
+                    pessoal do administrador (TELEGRAM_PERSONAL_CHAT_ID), sem
+                    tocar no payload do WhatsApp. Depois do lançamento não faz nada.
+    --fase          imprime "teste" (antes do lançamento) ou "lancado".
+    --dry-run       mostra as mensagens sem enviar.
 
-Uso local (sem enviar nada):
+Uso local:
     python versiculo_diario.py --dry-run [--data AAAA-MM-DD]
 """
 from __future__ import annotations
@@ -25,9 +31,10 @@ from zoneinfo import ZoneInfo
 FICHEIRO_VERSICULOS = Path(__file__).with_name("dados") / "versiculos_iasd_ara_5anos.json"
 FICHEIRO_WHATSAPP = Path("whatsapp_msg.txt")
 FUSO = ZoneInfo("Europe/Lisbon")
-# Dia em que é publicado o 1.º versículo (id 1). Pode ser alterado com a
-# variável do repositório VERSICULOS_DATA_INICIO (AAAA-MM-DD).
-DATA_INICIO_PADRAO = datetime.date(2026, 11, 28)
+# Lançamento oficial: dia em que é publicado o 1.º versículo (id 1). Antes
+# desta data o bot está em teste (só chat do administrador). Pode ser
+# alterado com a variável do repositório VERSICULOS_DATA_INICIO (AAAA-MM-DD).
+DATA_INICIO_PADRAO = datetime.date(2027, 1, 1)
 MAX_TENTATIVAS = 3
 ESPERA_ENTRE_TENTATIVAS_S = 20
 
@@ -83,8 +90,12 @@ def carregar_versiculos(caminho: Path) -> list[dict[str, str]]:
 
 
 def indice_do_dia(hoje: datetime.date, inicio: datetime.date, total: int) -> int:
-    """Índice (0-based) do versículo de 'hoje'. Antes do início usa o 1.º."""
-    return max(0, (hoje - inicio).days) % total
+    """Índice (0-based) do versículo de 'hoje'.
+
+    Antes do início (fase de teste) continua a rodar, com os últimos
+    versículos do ciclo, e cai exatamente no 1.º no dia do lançamento.
+    """
+    return (hoje - inicio).days % total
 
 
 def _data_pt(d: datetime.date) -> str:
@@ -139,10 +150,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="mostra as mensagens sem enviar")
     parser.add_argument("--data", type=datetime.date.fromisoformat,
                         help="simula outro dia (AAAA-MM-DD)")
+    modo = parser.add_mutually_exclusive_group()
+    modo.add_argument("--admin-teste", action="store_true",
+                      help="antes do lançamento: envia só para o chat do administrador")
+    modo.add_argument("--fase", action="store_true",
+                      help='imprime "teste" ou "lancado" e sai')
     args = parser.parse_args(argv)
 
     hoje = args.data or datetime.datetime.now(FUSO).date()
     inicio = _data_inicio()
+    em_teste = hoje < inicio
+
+    if args.fase:
+        print("teste" if em_teste else "lancado")
+        return 0
+    if args.admin_teste and not em_teste:
+        print(f"Lançamento em {inicio} já ocorreu: modo de teste inativo.")
+        return 0
 
     # Import tardio: o módulo das meditações traz requests/bs4, desnecessários
     # para --dry-run e para os testes das funções puras acima.
@@ -164,10 +188,29 @@ def main(argv: list[str] | None = None) -> int:
     msg_wa = formatar_whatsapp(v, hoje)
     print(f"Data (Lisboa): {hoje} | início: {inicio} | versículo {i + 1}/{len(versiculos)}: {v['referencia']}")
 
+    if args.admin_teste:
+        cabecalho = escapar_mdv2(f"🧪 TESTE — só para o administrador. "
+                                 f"Lançamento a {inicio:%d-%m-%Y} "
+                                 f"(versículo {i + 1}/{len(versiculos)}).")
+        msg_tg = cabecalho + "\n\n" + msg_tg
+
     if args.dry_run:
         print("\n--- Telegram (MarkdownV2) ---\n" + msg_tg)
-        print("\n--- WhatsApp ---\n" + msg_wa)
+        if not args.admin_teste:
+            print("\n--- WhatsApp ---\n" + msg_wa)
         return 0
+
+    if args.admin_teste:
+        # Só Telegram pessoal; o whatsapp_msg.txt das meditações fica intacto.
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_admin = os.getenv("TELEGRAM_PERSONAL_CHAT_ID")
+        if not token or not chat_admin:
+            print("ERRO: TELEGRAM_BOT_TOKEN ou TELEGRAM_PERSONAL_CHAT_ID não definidos.")
+            return 1
+        ok, erro = send_telegram_message(msg_tg, token, chat_admin)
+        if not ok:
+            print("Falha no envio de teste: " + (erro or "").replace(token, "***"))
+        return 0 if ok else 1
 
     # Payload do WhatsApp primeiro: uma falha no Telegram não deve impedir o grupo.
     FICHEIRO_WHATSAPP.write_text(msg_wa + "\n", encoding="utf-8")

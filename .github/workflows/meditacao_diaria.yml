@@ -138,6 +138,20 @@ jobs:
           TELEGRAM_PERSONAL_CHAT_ID: ${{ secrets.TELEGRAM_PERSONAL_CHAT_ID }}
         run: python meditacao_iasdah.py
 
+      # Fase de teste do versículo diário: até ao lançamento
+      # (VERSICULOS_DATA_INICIO, por omissão 2027-01-01) envia o versículo do
+      # dia só para o chat pessoal do administrador. Depois do lançamento não
+      # faz nada (o versículo passa a sair às 14:00 no seu workflow). Nunca
+      # falha o job nem toca no payload do WhatsApp das meditações.
+      - name: Versículo diário (teste no chat do administrador)
+        if: ${{ !inputs.pareamento }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_PERSONAL_CHAT_ID: ${{ secrets.TELEGRAM_PERSONAL_CHAT_ID }}
+          VERSICULOS_DATA_INICIO: ${{ vars.VERSICULOS_DATA_INICIO }}
+        run: python versiculo_diario.py --admin-teste
+
       ############################################################
       # WHATSAPP
       ############################################################
